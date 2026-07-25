@@ -205,6 +205,13 @@ function findBaseIndex(rows) {
 const f3 = (v) => (isNaN(v) ? "" : v.toFixed(3));
 const f4 = (v) => (isNaN(v) ? "" : v.toFixed(4));
 
+// Evita "CSV/formula injection": células de texto iniciando com = + - @ ou TAB
+// seriam interpretadas como fórmula ao abrir no Excel/LibreOffice/Sheets.
+function safeCell(v) {
+  const s = String(v ?? "");
+  return /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+}
+
 function download(filename, content, mime = "text/plain") {
   const blob = new Blob(["\uFEFF" + content], { type: mime + ";charset=utf-8" });
   const a = document.createElement("a");
@@ -254,8 +261,12 @@ export default function App() {
   }, [raw, colRoles]);
 
   // ───── Upload TXT/CSV bruto ─────
+  const MAX_FILE_MB = 25;
+  const tooBig = (file) => file.size > MAX_FILE_MB * 1024 * 1024;
+
   const loadTxt = (file) => {
     setError("");
+    if (tooBig(file)) { setError(`Arquivo bruto acima de ${MAX_FILE_MB} MB — confira se é mesmo o export de pontos.`); return; }
     const reader = new FileReader();
     reader.onload = (ev) => {
       const res = parseRaw(String(ev.target.result));
@@ -292,6 +303,7 @@ export default function App() {
   // ───── Upload PDF do relatório IBGE-PPP ─────
   const loadPdf = async (file) => {
     setError("");
+    if (tooBig(file)) { setError(`PDF acima de ${MAX_FILE_MB} MB — o relatório do IBGE-PPP tem poucas páginas; confira o arquivo.`); return; }
     setPdfBusy(true);
     try {
       const buf = await file.arrayBuffer();
@@ -365,8 +377,8 @@ export default function App() {
   const buildRows = () => {
     const head = ["PONTO", "DESCRICAO", "E", "N", `Z ${zType}`, "SIGMA E", "SIGMA N", "SIGMA Z", "SITUACAO", "ALTURA ANT", "DATA", "PDOP"];
     const sB = (v) => (pdfInfo?.ok && !isNaN(v) ? f3(v) : "0");
-    const baseRow = [baseName, baseName, f3(calc.pE), f3(calc.pN), f4(calc.pZ), sB(pdfInfo?.sigmaLon), sB(pdfInfo?.sigmaLat), sB(pdfInfo?.sigmaAlt), "BASE", isNaN(calc.vArp) ? "" : f3(calc.vArp), pdfInfo?.dataInicio ?? "", "0"];
-    const rows = calc.pts.map((p) => [p.name, p.code, f3(p.ce), f3(p.cn), f4(p.cz), f3(p.se), f3(p.sn), f3(p.sz), p.sol, isNaN(p.antH) ? "" : f3(p.antH), p.start, isNaN(p.pdop) ? "" : String(p.pdop)]);
+    const baseRow = [safeCell(baseName), safeCell(baseName), f3(calc.pE), f3(calc.pN), f4(calc.pZ), sB(pdfInfo?.sigmaLon), sB(pdfInfo?.sigmaLat), sB(pdfInfo?.sigmaAlt), "BASE", isNaN(calc.vArp) ? "" : f3(calc.vArp), pdfInfo?.dataInicio ?? "", "0"];
+    const rows = calc.pts.map((p) => [safeCell(p.name), safeCell(p.code), f3(p.ce), f3(p.cn), f4(p.cz), f3(p.se), f3(p.sn), f3(p.sz), safeCell(p.sol), isNaN(p.antH) ? "" : f3(p.antH), safeCell(p.start), isNaN(p.pdop) ? "" : String(p.pdop)]);
     return [head, baseRow, ...rows];
   };
 
