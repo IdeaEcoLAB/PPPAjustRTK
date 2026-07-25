@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ajuste PPP — Correção GNSS RTK por base IBGE-PPP</title>
+    <script>
+      // Polyfill para navegadores sem Promise.withResolvers (exigido pelo pdf.js)
+      if (!Promise.withResolvers) {
+        Promise.withResolvers = function () {
+          var resolve, reject;
+          var promise = new Promise(function (res, rej) { resolve = res; reject = rej; });
+          return { promise: promise, resolve: resolve, reject: reject };
+        };
+      }
+    </script>
+    <script src="https://cdn.tailwindcss.com"></script>
+  </head>
+  <body>
+    <div id="root">
+      <div style="font-family: sans-serif; padding: 40px; text-align: center; color: #475569">
+        Carregando o Ajuste PPP…
+        <br /><small>Se esta mensagem não sumir, abra o console do navegador (F12) e veja o erro.
+        Lembre-se: o index.html não funciona aberto direto do arquivo — rode <code>npm run dev</code> ou acesse pela URL do Vercel.</small>
+      </div>
+    </div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
