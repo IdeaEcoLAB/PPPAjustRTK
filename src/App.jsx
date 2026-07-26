@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useEffect } from "react";
 import {
   Upload, Download, FileText, Crosshair, CheckCircle2, AlertTriangle,
   RefreshCw, Plus, Pencil, ShieldAlert, FileDown, Satellite, HelpCircle,
@@ -214,6 +214,54 @@ function download(filename, content, mime = "text/plain") {
 
 const TAB_LABELS = ["1 · Arquivos", "2 · Colunas", "3 · Base & PPP", "4 · Resultados", "5 · Desenhos"];
 
+// Número que "conta" do valor anterior até o novo, com pulso ao mudar
+function CountUp({ value, decimals = 4, signed = false }) {
+  const [disp, setDisp] = useState(0);
+  const prevRef = useRef(0);
+  const [pulse, setPulse] = useState(false);
+  useEffect(() => {
+    const from = prevRef.current;
+    const to = value;
+    if (!isFinite(to)) return;
+    prevRef.current = to;
+    if (from === to) { setDisp(to); return; }
+    setPulse(true);
+    const t0 = performance.now();
+    const dur = 400;
+    let raf;
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / dur);
+      const eased = 1 - Math.pow(1 - k, 3);
+      setDisp(from + (to - from) * eased);
+      if (k < 1) raf = requestAnimationFrame(step);
+      else setPulse(false);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [value]);
+  return (
+    <span className={`inline-block ${pulse ? "anim-pulseonce" : ""}`}>
+      {signed && disp >= 0 ? "+" : ""}{disp.toFixed(decimals)}
+    </span>
+  );
+}
+
+// Barra de progresso fina (determinada ou indeterminada)
+function ProgressBar({ percent, label }) {
+  return (
+    <div className="mt-3 w-full">
+      {label && <p aria-live="polite" className="mb-1 text-[11px] font-semibold text-teal-700">{label}</p>}
+      <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+        {percent === null || percent === undefined ? (
+          <div className="anim-barslide absolute h-full w-2/5 rounded-full bg-teal-600" />
+        ) : (
+          <div className="h-full rounded-full bg-teal-600 transition-all duration-150" style={{ width: `${percent}%` }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState(0);
   // Arquivos
@@ -243,6 +291,13 @@ export default function App() {
   const [antH0, setAntH0] = useState("");
   const [antH1, setAntH1] = useState("");
 
+  // Microinterações
+  const [txtProgress, setTxtProgress] = useState(null);   // 0-100 durante leitura do TXT
+  const [pdfProgress, setPdfProgress] = useState(null);   // {p,t} durante leitura do PDF
+  const [analyzing, setAnalyzing] = useState(false);      // "Analisando colunas…"
+  const [pdfJustFilled, setPdfJustFilled] = useState(false); // flash nos campos preenchidos
+  const [downloaded, setDownloaded] = useState(null);     // 'csv'|'txt'|'meta' → "✓ Baixado"
+
   const txtRef = useRef(null);
   const pdfRef = useRef(null);
 
@@ -261,9 +316,14 @@ export default function App() {
     setError("");
     if (tooBig(file)) { setError(`Arquivo bruto acima de ${MAX_FILE_MB} MB — confira se é mesmo o export de pontos.`); return; }
     const reader = new FileReader();
+    setTxtProgress(0);
+    reader.onprogress = (ev) => {
+      if (ev.lengthComputable) setTxtProgress(Math.round((ev.loaded / ev.total) * 100));
+    };
     reader.onload = (ev) => {
+      setTxtProgress(100);
       const res = parseRaw(String(ev.target.result));
-      if (res.error) { setError("Arquivo bruto: " + res.error); return; }
+      if (res.error) { setError("Arquivo bruto: " + res.error); setTxtProgress(null); return; }
       setRaw({ matrix: res.matrix, delim: res.delim, header: res.header });
       setColRoles(res.roles);
       setFileName(file.name);
@@ -275,20 +335,30 @@ export default function App() {
         if (!pdfInfo?.station) setBaseName(b.name || "BASE");
         setArp(isNaN(b.antH) ? "" : String(b.antH));
       }
-      setTab(1); // avança para conferência de colunas
+      // pausa curta e visível: o app está analisando as colunas do arquivo
+      setAnalyzing(true);
+      setTimeout(() => {
+        setAnalyzing(false);
+        setTxtProgress(null);
+        setTab(1);
+      }, 500);
     };
-    reader.onerror = () => setError("Não foi possível ler o arquivo bruto.");
+    reader.onerror = () => { setError("Não foi possível ler o arquivo bruto."); setTxtProgress(null); };
     reader.readAsText(file, "utf-8");
   };
 
+  const [flashCols, setFlashCols] = useState({});
   const setRole = (colIndex, role) => {
     setColRoles((prev) => {
       const next = [...prev];
+      const fl = { [colIndex]: "teal" };
       if (role !== "ignore") {
         const dup = next.indexOf(role);
-        if (dup >= 0 && dup !== colIndex) next[dup] = "ignore";
+        if (dup >= 0 && dup !== colIndex) { next[dup] = "ignore"; fl[dup] = "gray"; }
       }
       next[colIndex] = role;
+      setFlashCols(fl);
+      setTimeout(() => setFlashCols({}), 600);
       return next;
     });
   };
@@ -300,7 +370,7 @@ export default function App() {
     try {
       const buf = await file.arrayBuffer();
       const { extractPppFromPdf } = await import("./ppp-pdf");
-      const info = await extractPppFromPdf(buf);
+      const info = await extractPppFromPdf(buf, (p, t) => setPdfProgress({ p, t }));
       setPdfInfo(info);
       setPdfName(file.name);
       if (info.ok) {
@@ -309,6 +379,8 @@ export default function App() {
         if (!isNaN(info.altOrto)) { setPppZ(f4(info.altOrto)); setZType("Ortométrica"); }
         else { setPppZ(f4(info.altGeo)); setZType("Geométrica"); }
         if (info.station) setBaseName(info.station);
+        setPdfJustFilled(true);
+        setTimeout(() => setPdfJustFilled(false), 1400);
       } else {
         setError("Não foi possível localizar as coordenadas no PDF. Confira se é o relatório do IBGE-PPP e, se necessário, digite os valores manualmente na aba 3.");
       }
@@ -316,6 +388,7 @@ export default function App() {
       setError("Falha ao ler o PDF: " + (e?.message || e) + ". Você pode digitar as coordenadas manualmente na aba 3.");
     } finally {
       setPdfBusy(false);
+      setPdfProgress(null);
     }
   };
 
@@ -508,19 +581,19 @@ export default function App() {
   const inputCls = "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 font-mono text-sm text-slate-800 focus:border-teal-600 focus:outline-none focus:ring-2 focus:ring-teal-600/20";
   const label = "mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500";
 
-  const UploadCard = ({ done, busy, icon: Icon, title, desc, hint, onPick, inputEl }) => (
+  const UploadCard = ({ done, busy, progress, progressLabel, icon: Icon, title, desc, hint, onPick, inputEl }) => (
     <button
       type="button"
       onClick={onPick}
-      className={`relative flex flex-col items-center rounded-2xl border-2 border-dashed p-6 text-center transition-colors ${done ? "border-teal-500 bg-teal-50" : "border-slate-300 bg-white hover:border-teal-500"}`}
+      className={`relative flex flex-col items-center rounded-2xl border-2 border-dashed p-6 text-center transition-colors duration-200 ${done ? "border-teal-500 bg-teal-50" : "border-slate-300 bg-white hover:border-teal-500"}`}
     >
       {inputEl}
-      <Icon className={done ? "text-teal-700" : "text-slate-400"} size={30} />
+      <Icon className={`transition-colors duration-200 ${done ? "text-teal-700" : "text-slate-400"}`} size={30} />
       <p className="mt-2 text-sm font-semibold">{title}</p>
       <p className="mt-1 text-xs text-slate-500">{desc}</p>
-      {busy && <p className="mt-2 text-xs font-semibold text-teal-700">Lendo PDF…</p>}
+      {busy && <ProgressBar percent={progress} label={progressLabel} />}
       {done && !busy && (
-        <span className="mt-2 inline-flex items-center gap-1 rounded-full bg-teal-700 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+        <span className="anim-pop mt-2 inline-flex items-center gap-1 rounded-full bg-teal-700 px-2.5 py-0.5 text-[11px] font-semibold text-white">
           <CheckCircle2 size={12} /> {done}
         </span>
       )}
@@ -541,6 +614,15 @@ export default function App() {
   ];
 
   const bigDelta = calc?.ready && (Math.abs(calc.dE) > 10 || Math.abs(calc.dN) > 10 || Math.abs(calc.dZ) > 10);
+
+  // etapa concluída → check na aba
+  const tabDone = [
+    !!raw,
+    !!raw && mappingOk,
+    !!calc?.ready,
+    false,
+    false,
+  ];
 
   const NextBtn = ({ to, children }) => (
     <button
@@ -576,7 +658,7 @@ export default function App() {
               key={t}
               onClick={() => tabEnabled[i] && setTab(i)}
               disabled={!tabEnabled[i]}
-              className={`whitespace-nowrap rounded-t-lg border-x border-t px-4 py-2 text-xs font-semibold transition-colors ${
+              className={`flex items-center gap-1 whitespace-nowrap rounded-t-lg border-x border-t px-4 py-2 text-xs font-semibold transition-colors duration-150 ${
                 tab === i
                   ? "border-slate-200 bg-slate-100 text-teal-800"
                   : tabEnabled[i]
@@ -584,6 +666,7 @@ export default function App() {
                   : "cursor-not-allowed border-transparent text-slate-300"
               }`}
             >
+              {tabDone[i] && <CheckCircle2 size={12} className="anim-pop text-teal-600" />}
               {t}
               {i === 3 && observations.length > 0 && tabEnabled[3] && (
                 <span className="ml-1.5 rounded-full bg-sky-100 px-1.5 text-[10px] text-sky-700">{observations.length}</span>
@@ -593,7 +676,8 @@ export default function App() {
         </nav>
       </header>
 
-      <main className="mx-auto max-w-6xl space-y-5 px-5 py-6">
+      <main className="mx-auto max-w-6xl px-5 py-6">
+        <div key={tab} className="anim-fadeslide space-y-5">
         {error && (
           <div className="flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
             <AlertTriangle size={16} className="mt-0.5 shrink-0" /> {error}
@@ -617,6 +701,8 @@ export default function App() {
               <UploadCard
                 done={pdfName && pdfInfo?.ok ? pdfName : pdfName ? pdfName + " (verifique)" : ""}
                 busy={pdfBusy}
+                progress={pdfProgress ? Math.round((pdfProgress.p / pdfProgress.t) * 100) : null}
+                progressLabel={pdfProgress ? `Lendo página ${pdfProgress.p} de ${pdfProgress.t}…` : "Abrindo PDF…"}
                 icon={Satellite}
                 title="① Relatório IBGE-PPP da base (PDF)"
                 desc="O PDF que o IBGE envia por e-mail após o processamento. Extraímos coordenadas, sigmas e rastreio automaticamente."
@@ -625,7 +711,10 @@ export default function App() {
                 inputEl={<input ref={pdfRef} type="file" accept=".pdf" className="hidden" onChange={(e) => e.target.files[0] && loadPdf(e.target.files[0])} />}
               />
               <UploadCard
-                done={raw ? `${fileName} · ${parsed?.rows.length ?? 0} pontos` : ""}
+                done={raw && !analyzing ? `${fileName} · ${parsed?.rows.length ?? 0} pontos` : ""}
+                busy={txtProgress !== null || analyzing}
+                progress={analyzing ? null : txtProgress}
+                progressLabel={analyzing ? "Analisando colunas…" : "Lendo arquivo…"}
                 icon={Upload}
                 title="② Dados brutos RTK (TXT ou CSV)"
                 desc="Export do coletor com todos os pontos do levantamento, incluindo a linha da base."
@@ -640,7 +729,7 @@ export default function App() {
                 <p className="mb-2 flex items-center gap-2 font-semibold text-teal-800">
                   <FileDown size={15} /> Lido do relatório IBGE-PPP{pdfInfo.station ? ` — marco ${pdfInfo.station}` : ""}{pdfInfo.dataInicio ? ` (${pdfInfo.dataInicio})` : ""}:
                 </p>
-                <div className="grid grid-cols-2 gap-2 font-mono text-xs md:grid-cols-4">
+                <div className="chips-stagger grid grid-cols-2 gap-2 font-mono text-xs md:grid-cols-4">
                   <div className="rounded bg-slate-50 p-2">UTM E: <strong>{f3(pdfInfo.utmE)}</strong></div>
                   <div className="rounded bg-slate-50 p-2">UTM N: <strong>{f3(pdfInfo.utmN)}</strong></div>
                   <div className="rounded bg-slate-50 p-2">Alt. Normal: <strong>{isNaN(pdfInfo.altOrto) ? "—" : f4(pdfInfo.altOrto)}</strong></div>
@@ -830,15 +919,15 @@ export default function App() {
                 <div className="grid grid-cols-2 gap-3">
                   <div>
                     <label className={label}>UTM E (m)</label>
-                    <input value={pppE} onChange={(e) => setPppE(e.target.value)} className={inputCls} placeholder="347204.008" />
+                    <input value={pppE} onChange={(e) => setPppE(e.target.value)} className={`${inputCls} ${pdfJustFilled ? "anim-flashteal" : ""}`} placeholder="347204.008" />
                   </div>
                   <div>
                     <label className={label}>UTM N (m)</label>
-                    <input value={pppN} onChange={(e) => setPppN(e.target.value)} className={inputCls} placeholder="7444262.734" />
+                    <input value={pppN} onChange={(e) => setPppN(e.target.value)} className={`${inputCls} ${pdfJustFilled ? "anim-flashteal" : ""}`} placeholder="7444262.734" />
                   </div>
                   <div>
                     <label className={label}>Altitude (m)</label>
-                    <input value={pppZ} onChange={(e) => setPppZ(e.target.value)} className={inputCls} placeholder="452.570" />
+                    <input value={pppZ} onChange={(e) => setPppZ(e.target.value)} className={`${inputCls} ${pdfJustFilled ? "anim-flashteal" : ""}`} placeholder="452.570" />
                   </div>
                   <div>
                     <label className={label}>Tipo de altitude</label>
@@ -872,10 +961,10 @@ export default function App() {
                     <h2 className="text-sm font-bold uppercase tracking-wide text-teal-800">Parâmetros calculados e exportação</h2>
                   </div>
                   <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
-                    {[["ΔE", calc.dE], ["ΔN", calc.dN], ["ΔZ", calc.dZ], ["Desloc. planim.", Math.hypot(calc.dE, calc.dN)], ["Z base reduzido", calc.zBaseRed]].map(([k, v]) => (
+                    {[["ΔE", calc.dE, true], ["ΔN", calc.dN, true], ["ΔZ", calc.dZ, true], ["Desloc. planim.", Math.hypot(calc.dE, calc.dN), false], ["Z base reduzido", calc.zBaseRed, false]].map(([k, v, sg]) => (
                       <div key={k} className="rounded-lg bg-white p-3 text-center">
                         <div className="text-xs font-semibold text-slate-500">{k}</div>
-                        <div className="font-mono text-lg font-bold text-teal-900">{v >= 0 && (k === "ΔE" || k === "ΔN" || k === "ΔZ") ? "+" : ""}{f4(v)}</div>
+                        <div className="font-mono text-lg font-bold text-teal-900"><CountUp value={v} signed={sg} /></div>
                         <div className="text-[10px] text-slate-400">metros</div>
                       </div>
                     ))}
@@ -887,15 +976,23 @@ export default function App() {
                     </div>
                   )}
                   <div className="mt-4 flex flex-wrap items-center gap-3">
-                    <button onClick={exportCSV} className="flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800">
-                      <Download size={15} /> Baixar CSV ajustado
-                    </button>
-                    <button onClick={exportTXT} className="flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-800">
-                      <Download size={15} /> Baixar TXT ajustado
-                    </button>
-                    <button onClick={exportMeta} className="flex items-center gap-2 rounded-lg border border-teal-700 px-4 py-2 text-sm font-semibold text-teal-800 hover:bg-white">
-                      <FileText size={15} /> Baixar metadados
-                    </button>
+                    {[
+                      { id: "csv", fn: exportCSV, label: "Baixar CSV ajustado", solid: true, Icon: Download },
+                      { id: "txt", fn: exportTXT, label: "Baixar TXT ajustado", solid: true, Icon: Download },
+                      { id: "meta", fn: exportMeta, label: "Baixar metadados", solid: false, Icon: FileText },
+                    ].map(({ id, fn, label: lbl, solid, Icon }) => (
+                      <button
+                        key={id}
+                        onClick={() => { fn(); setDownloaded(id); setTimeout(() => setDownloaded((d) => (d === id ? null : d)), 2000); }}
+                        className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-all duration-150 active:scale-95 ${
+                          downloaded === id
+                            ? "bg-teal-100 text-teal-800 ring-1 ring-teal-300"
+                            : solid ? "bg-teal-700 text-white hover:bg-teal-800" : "border border-teal-700 text-teal-800 hover:bg-white"
+                        }`}
+                      >
+                        {downloaded === id ? <><CheckCircle2 size={15} className="anim-pop" /> Baixado</> : <><Icon size={15} /> {lbl}</>}
+                      </button>
+                    ))}
                     <span className="ml-auto text-xs text-slate-500">
                       {calc.pts.length} pontos · {calc.fixed} fixed · {calc.float_} float
                     </span>
@@ -988,6 +1085,7 @@ export default function App() {
         <footer className="pb-6 pt-2 text-center text-[11px] text-slate-400">
           Método: E′ = E + ΔE · N′ = N + ΔN · Z′ = Z + ΔZ, com ΔZ = Z(PPP) − Z(base reduzido ao marco). Processamento 100% local no navegador.
         </footer>
+        </div>
       </main>
     </div>
   );

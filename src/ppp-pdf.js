@@ -29,10 +29,11 @@ function firstMatch(text, patterns) {
   return NaN;
 }
 
-export async function extractPppFromPdf(arrayBuffer) {
+export async function extractPppFromPdf(arrayBuffer, onProgress) {
   const pdf = await pdfjsLib.getDocument({ data: arrayBuffer, isEvalSupported: false, disableAutoFetch: true }).promise;
   let text = "";
   for (let i = 1; i <= pdf.numPages; i++) {
+    if (onProgress) onProgress(i, pdf.numPages);
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
     text += content.items.map((it) => it.str).join(" ") + "\n";
